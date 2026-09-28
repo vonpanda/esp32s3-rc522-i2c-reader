@@ -21,7 +21,7 @@ jobs:
       # PlatformIO re-downloads the whole toolchain for every platform it has
       # not seen before, which dominates the job runtime when uncached.
       - name: Cache PlatformIO
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/pip
