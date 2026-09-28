@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build both environments
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # PlatformIO re-downloads the whole toolchain for every platform it has
+      # not seen before, which dominates the job runtime when uncached.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+
+      - name: Build production firmware
+        run: pio run -e rymcu-esp32-s3-devkitc-1
+
+      - name: Build bring-up firmware
+        run: pio run -e bringup
+
+      # Printed so flash/RAM headroom is visible in the log on every build.
+      - name: Firmware size
+        run: ls -l .pio/build/*/firmware.bin

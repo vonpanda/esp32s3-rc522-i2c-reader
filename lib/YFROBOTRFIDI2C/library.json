@@ -1,0 +1,8 @@
+{
+    "name": "YFROBOTRFIDI2C",
+    "version": "1.0.3",
+    "description": "Vendored YFROBOT RFID/NFC (MFRC522 / SI522A) I2C driver for HS-S62A-PL module. Locally patched: unbounded busy-wait loops replaced with bounded ones. See PATCHES.md.",
+    "keywords": "yfrobot, rfid, nfc, mfrc522, si522a, i2c, arduino",
+    "frameworks": "arduino",
+    "platforms": "*"
+}

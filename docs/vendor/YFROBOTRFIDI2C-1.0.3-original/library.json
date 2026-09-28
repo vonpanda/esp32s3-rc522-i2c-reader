@@ -1,0 +1,15 @@
+{
+    "name": "YFROBOTRFIDI2C",
+    "keywords": "yfrobot, RFID, NFC",
+    "description": "Library that makes RFID/NFC work easy to use.",
+    "repository":
+    {
+        "type": "git",
+        "url": "https://github.com/YFROBOT-TM/ .git"
+    },
+    "frameworks": "arduino",
+    "platforms": [
+      "atmelavr",
+      "atmelsam"
+    ]
+}
