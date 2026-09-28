@@ -1,12 +1,18 @@
-# 上电排查手册 — HS-S62A-PL RFID 模块
+# Power-up Troubleshooting Handbook — HS-S62A-PL RFID Module
 
-> 配套固件：`pio run -e bringup -t upload`，然后 `pio device monitor -b 115200`。
+**English** ｜ [中文](BRINGUP.zh-CN.md)
+
+> Companion firmware: `pio run -e bringup -t upload`, then `pio device monitor -b 115200`.
+
+> **Note on log samples**: the firmware prints Chinese. Log lines are reproduced
+> verbatim (they are what you will actually see on the serial port); English
+> glosses appear in the surrounding text.
 
 ---
 
-## 0. 先说结论：原来那段调试输出为什么没有信息量
+## 0. First, the conclusion: why the original debug output carried no information
 
-原代码：
+The original code:
 
 ```cpp
 pinMode(SDA_PIN, INPUT_PULLUP);
@@ -17,188 +23,227 @@ Serial.printf("After Wire.begin:  SDA=%d, SCL=%d\n", ...);
 Serial.printf("After transfer:   SDA=%d, SCL=%d\n", ...);
 ```
 
-三行输出全是 `SDA=1, SCL=1`，**这是必然结果，接没接模块都一样**：
+All three lines print `SDA=1, SCL=1`, and **that is a foregone conclusion — it is the
+same whether or not the module is connected**:
 
-- 打开内部上拉后，只要线没被短路到地，读出来就是 1；
-- 模块没供电、没接 SDA、甚至模块根本不在板子上，也是 1。
+- with the internal pull-up enabled, the pin reads 1 as long as the line is not shorted to ground;
+- the module unpowered, SDA not connected, or the module not on the board at all — still 1.
 
-也就是说这三行只能证明"线没短路"，对其他任何故障都无鉴别力。
+So those three lines prove only "the line is not shorted" and discriminate nothing else.
 
-**上电检查 3 步**（接线以 `CFG_PIN_I2C_SDA=18`、`CFG_PIN_I2C_SCL=17` 为准，
-即模块 SDA → GPIO18、模块 SCL → GPIO17）：
+**Three power-up checks** (wiring follows `CFG_PIN_I2C_SDA=18` / `CFG_PIN_I2C_SCL=17`,
+i.e. module SDA → GPIO18, module SCL → GPIO17):
 
-| 步 | 测什么 | 怎么测 | 结论 |
+| Step | What to measure | How | Verdict |
 |---|---|---|---|
-| 1 | 模块有没有电 | 万用表量模块 V 与 G 之间 | 3.3–5 V，否则供电就是根因 |
-| 2 | 有没有外部上拉 | 断电，量 SDA–VCC、SCL–VCC 的电阻 | 几 kΩ 说明有上拉；开路说明没有 |
-| 3 | 线对不对 | 断电，量两端通断 | 别只看颜色，用蜂鸣档点一下 |
+| 1 | Is the module powered? | multimeter across the module's V and G | 3.3–5 V; if not, the supply is the root cause |
+| 2 | Are there external pull-ups? | power off, measure resistance SDA–VCC and SCL–VCC | a few kΩ means yes; open circuit means no |
+| 3 | Is the wiring right? | power off, continuity-check both ends | do not trust the colours — buzz it out |
 
 ---
 
-## 1. 关键：`endTransmission()` 的返回值含义
+## 1. Key: what `endTransmission()`'s return value means
 
-ESP32 Arduino core 2.0.17 的 `Wire::endTransmission()` 返回值（源码 `Wire.cpp:433`）：
+`Wire::endTransmission()` return values in ESP32 Arduino core 2.0.17 (source `Wire.cpp:433`):
 
-| 返回值 | 含义 | 现实指向 |
+| Value | Meaning | What it points to |
 |---|---|---|
-| `0` | 成功 | 设备存在且应答 |
-| `1` | 数据超长 | 调用方式错 |
-| `2` | **NACK_ADDRESS** | 总线电气**正常**，但这个地址没有从机应答 → 地址写错 / 模块没工作 / 模块损坏 |
-| `3` | NACK on data | 寄存器地址不被接受 |
-| `4` | other | 参数错误 |
-| `5` | **TIMEOUT** | 事务**根本没能在总线上完成** → 被拉死 / 无上拉 / 未供电 / 接反 |
+| `0` | success | device present and ACKing |
+| `1` | data too long | calling convention is wrong |
+| `2` | **NACK_ADDRESS** | bus is electrically **fine**, but nothing ACKs this address → wrong address / module not running / module dead |
+| `3` | NACK on data | register address not accepted |
+| `4` | other | bad parameter |
+| `5` | **TIMEOUT** | the transaction **never completed on the bus** → held low / no pull-up / unpowered / swapped pins |
 
-### 你那句 `endTransmission = 5` 说明什么
+### What your `endTransmission = 5` told us
 
-**它不是"地址不对"。** 地址不对——总线正常但无人应答——会返回 `2`。
+**It is not "wrong address".** A wrong address — bus fine but nobody answering — returns `2`.
 
-返回 `5` 是 ESP-IDF 的 `ESP_ERR_TIMEOUT`（`Wire.cpp:468` 的映射），意思是这一次
-I2C 事务在软件超时前没能完成。按现场概率排序：
+`5` is ESP-IDF's `ESP_ERR_TIMEOUT` (the mapping at `Wire.cpp:468`): the I2C transaction did
+not complete before the software timeout. In descending order of field probability:
 
-1. **模块 VCC 没接**（最常见）。只接了 SDA/SCL/GND 时，SDA/SCL 仍被上拉读成高，
-   看起来"连线正常"，但模块完全没有能力应答。
-2. **SDA/SCL 接反**。
-3. **没有任何外部上拉**。RC522 模块板载一般不带，只靠 ESP32 内部 ~45 kΩ，
-   100 kHz 下从机采样边沿的位置会错。
-4. **线被拉死**（短路、杜邦线压破皮、排线过长）。
-5. **模块需要断电重上电**。厂商库 README v1.0.3 明确写了这一条：
+1. **Module VCC not connected** (most common). With only SDA/SCL/GND wired, SDA and SCL are
+   still pulled high and it *looks* like the wiring is fine, but the module has no ability
+   to answer at all.
+2. **SDA/SCL swapped.**
+3. **No external pull-up at all.** RC522 modules generally do not carry one; relying on the
+   ESP32's internal ~45 kΩ puts the slave's sampling edge in the wrong place at 100 kHz.
+4. **A line held low** (short, crushed jumper insulation, over-long ribbon).
+5. **The module needs a power cycle.** The vendor library's README v1.0.3 states this
+   explicitly:
    > 优化代码，尝试解决重新上电，异常初始化无法正常通讯。未发现程序问题，解决方法：断电重启。
+   >
+   > *(attempted to fix abnormal init after re-powering; no program fault found, workaround: power-cycle)*
 
-> 另外，原代码把时钟设成了 `Wire.setClock(10000)`（10 kHz）。
-> 模块手册标称支持到 400 kHz，10 kHz 属于畸形配置：单字节要 900 µs，
-> ESP32 I2C 控制器的硬件超时是按配置频率换算的，极低速率下容易先超时。
-> 本固件统一用 100 kHz（`CFG_I2C_FREQ_HZ`）。
+> Also, the original code set the clock to `Wire.setClock(10000)` (10 kHz). The module is
+> rated to 400 kHz, and 10 kHz is a malformed configuration: one byte takes 900 µs, and the
+> ESP32 I2C controller's hardware timeout is derived from the configured frequency, so at
+> very low rates it tends to time out first. This firmware uses 100 kHz throughout
+> (`CFG_I2C_FREQ_HZ`).
 
 ---
 
-## 2. bring-up 固件的输出怎么读
+## 2. How to read the bring-up firmware's output
 
-它会自动依次做 6 步，每步都有结论。
+It runs six steps in sequence, each with a verdict.
 
-### 步骤 1 — 引脚健康自检（含锡桥检查）
+### Step 1 — Pin four-state check (including the solder-bridge test)
 
-先逐根测四个量，再测两根线之间有没有焊到一起。
+Each line is measured on four axes first, then the two lines are checked for having been
+soldered together.
 
-| 量 | 期望 | 说明 |
+| Reading | Expected | Meaning |
 |---|---|---|
-| `PULLUP` | 1 | 使能内部上拉能读到高。得 0 ⇒ 该脚被钉在 GND（连焊/击穿） |
-| `DRIVE0` | 0 | 开漏拉低能拉得动。得 1 ⇒ **输出级失效，这个脚不能用** |
-| `HiZ` | 1 | 关掉内部上下拉仍为高 ⇒ 外部上拉可达（焊盘 bonding 正常） |
-| `PULLDOWN` | 1 | 内部 ~45k 下拉都拉不低 ⇒ 存在强外部上拉（正常） |
+| `PULLUP` | 1 | enabling the internal pull-up reads high. Getting 0 ⇒ the pin is pinned to GND (solder bridge / blown) |
+| `DRIVE0` | 0 | open-drain can pull low. Getting 1 ⇒ **output stage failed, this pin is unusable** |
+| `HiZ` | 1 | still high with internal pulls disabled ⇒ an external pull-up is reachable (pad bonding is intact) |
+| `PULLDOWN` | 1 | even the internal ~45 kΩ pull-down cannot drag it low ⇒ a strong external pull-up exists (normal) |
 
-判读规则：
+Interpretation rules:
 
-| 现象 | 结论 |
+| Observation | Verdict |
 |---|---|
-| `PULLUP=1 DRIVE0=0 HiZ=1` | **正常**。三态齐全 |
-| `PULLUP=0` | 该脚被钉在低 —— 查连焊/锡桥；排除焊接问题后即该脚已击穿 |
-| `DRIVE0=1` | 该脚输出级坏了，换脚并同步改 `app_config.h` |
-| `HiZ=0` 而 `PULLUP=1` | **引脚本身是好的**，但线上没有外部上拉可达 ⇒ 焊点/走线断路，或模块没接 |
-| `PULLDOWN=0` 而 `HiZ=1` | 可用但偏弱：无外部上拉，仅靠内部 ~45k |
+| `PULLUP=1 DRIVE0=0 HiZ=1` | **normal** — all three states present |
+| `PULLUP=0` | the pin is pinned low — check for a solder bridge; once soldering is ruled out, the pin is blown |
+| `DRIVE0=1` | the pin's output stage is dead; move to another pin and update `app_config.h` |
+| `HiZ=0` with `PULLUP=1` | **the pin itself is fine**, but no external pull-up is reachable ⇒ open pad / broken trace, or the module is not connected |
+| `PULLDOWN=0` with `HiZ=1` | usable but weak: no external pull-up, relying on the internal ~45 kΩ |
 
-**锡桥检查**（两根线各自健康时才会跑）：把一根开漏拉低，另一根保持 `INPUT_PULLUP`
-并读值。另一根跟着变低 ⇒ 两根线是同一个网络 ⇒ I2C 必然不通。
+The **solder-bridge test** (it only runs when both lines are individually healthy): drive one
+line low open-drain while the other stays `INPUT_PULLUP`, and read it. If the other line
+follows it low ⇒ the two lines are the same net ⇒ I2C cannot possibly work.
 
-> 为什么锡桥必须单独测：两根线被焊到一起时，**每一根单看都完全"正常"**
-> —— 电平正常、上拉在位、能拉低。只有交叉驱动才能识破。
-> 重新焊接之后这是最常见的失效，而本板 J1 的 SDA/SCL 引脚（pin 11 / pin 10）恰好相邻。
+> Why a solder bridge needs its own test: when two lines are soldered together, **each one
+> looks completely "normal" on its own** — correct level, pull-up present, able to pull low.
+> Only cross-driving exposes it. After re-soldering this is the most common failure, and on
+> this board J1's SDA/SCL pins (pin 11 / pin 10) are adjacent.
 
-### 步骤 2 — 地址扫描 + 错误码直方图
+### Step 2 — Address scan with an error-code histogram
 
-这是最有价值的一步，它把 112 个地址的探测结果聚合成直方图：
+This is the most valuable step: it aggregates the probe results across 112 addresses into a
+histogram.
 
-- `OK=1 NACK=111 TIMEOUT=0` → 找到 0x28，正常。
-- `OK=0 NACK=112 TIMEOUT=0` → 总线电气正常但对面无人。**先怀疑 SDA/SCL 接反**
-  （见步骤 3），其次才是模块未供电/损坏。本工程实际踩过的就是这个。
-- `OK=0 NACK=0 TIMEOUT=112` → **物理层问题**：被拉死 / 无上拉 / 未供电。
-  注意 112 次超时会花掉约 2.2 秒（每次 20 ms），从耗时上也能认出这一档。
-- 混杂 → 时序临界，加 4.7 kΩ 上拉 / 缩短排线 / 降到 50 kHz。
+- `OK=1 NACK=111 TIMEOUT=0` → found 0x28, normal.
+- `OK=0 NACK=112 TIMEOUT=0` → bus is electrically fine but nobody is there. **Suspect swapped
+  SDA/SCL first** (see step 3), and only then an unpowered or dead module. This is exactly
+  what happened on this project.
+- `OK=0 NACK=0 TIMEOUT=112` → **physical-layer problem**: held low / no pull-up / unpowered.
+  Note 112 timeouts cost about 2.2 seconds (20 ms each), so the elapsed time alone identifies
+  this case.
+- Mixed → timing is marginal; add 4.7 kΩ pull-ups / shorten the ribbon / drop to 50 kHz.
 
-### 步骤 3 — 自动互换 SDA/SCL 重试
+### Step 3 — Automatic SDA/SCL swap retry
 
-如果步骤 2 一个设备都没找到，固件会用交换后的引脚再扫一遍。
-**互换后能扫到 ⇒ 直接确认接线接反**，不用再猜。
+If step 2 found no device at all, the firmware scans again with the pins exchanged.
+**Finding a device after the swap ⇒ swapped wiring is confirmed**, no more guessing.
 
-此时第 4、5 步会**继续沿用互换后能工作的那对引脚**跑完，用来自证模块本身是好的，
-最后在结论区给出正确接法。看完结果再断电对调线、重跑一次确认。
+Steps 4 and 5 then **continue with the working (swapped) pin pair** so the module can prove
+itself healthy, and the conclusion block states the correct wiring. Once you have read the
+result, power off, swap the two signal wires, and run it again to confirm.
 
-### 步骤 4 — 芯片型号确认
+### Step 4 — Chip identification
 
-读 `VersionReg`(寄存器 0x37)，这是判断"通信是否真建立"的唯一硬证据：
+Reads `VersionReg` (register 0x37) — the only hard evidence that communication is genuinely
+established:
 
-| 回读值 | 芯片 |
+| Read-back | Chip |
 |---|---|
 | `0x91` | MFRC522 v1.0 |
-| `0x92` | SI522A（**地址 0x28**） |
-| `0xB2` | SI522A-2F（**地址 0x2F**） |
-| `0x88` | FM17522 兼容片 |
-| `0x82` | "新版" MFRC522 |
-| `0x00` / `0xFF` | **通信没建立**（读回全 0 或全 1） |
+| `0x92` | SI522A (**address 0x28**) |
+| `0xB2` | SI522A-2F (**address 0x2F**) |
+| `0x88` | FM17522-compatible part |
+| `0x82` | "new" MFRC522 |
+| `0x00` / `0xFF` | **communication not established** (read back all zeros or all ones) |
 
-`0xB2` 这一行值得注意：厂商库默认地址是 0x28，但同一系列存在 0x2F 变体。
-生产固件已经把两个地址都试过，并会兜底做全总线扫描。
+The `0xB2` row is worth noting: the vendor library's default address is 0x28, but a 0x2F
+variant exists in the same family. The production firmware already tries both addresses and
+falls back to a full-bus scan.
 
-### 步骤 5 — 正式驱动挂载
+### Step 5 — Real driver mount
 
-走一遍生产固件完全相同的挂载路径。这一步通过，就说明可以换回生产固件了。
+Runs exactly the same mount path as the production firmware. Once this passes, you can go
+back to the production firmware.
+
+### Step 6 — Conclusion block
+
+A boxed summary that names the correct wiring and the next action, for example:
+
+```
+=========================================================
+ 结论: 模块完好，只是两根信号线接反了。
+       现在接法: 模块SDA->GPIO17, 模块SCL->GPIO18  (错)
+       正确接法: 模块SDA->GPIO18, 模块SCL->GPIO17
+       动作: 断电 -> 对调两根信号线 -> 重跑本固件，应直接在第 2 步命中。
+=========================================================
+```
+
+> *Verdict: the module is fine, the two signal wires are simply swapped. Current (wrong):
+> SDA→GPIO17, SCL→GPIO18. Correct: SDA→GPIO18, SCL→GPIO17. Action: power off → swap the two
+> wires → re-run this firmware; it should hit at step 2 directly.*
 
 ---
 
-## 3. 接线对照（ESP32-S3 DevKitC-1 ↔ 模块）
+## 3. Wiring (ESP32-S3 DevKitC-1 ↔ module)
 
-| 模块丝印 | 接到 ESP32-S3 | 备注 |
+| Module silkscreen | Connect to ESP32-S3 | Notes |
 |---|---|---|
-| G | GND | 必须接 |
-| V | 3V3（或 5V） | 3.3–5 V，模块板载有稳压 |
-| SDA | **GPIO18**（J1 pin 11） | 就是 `CFG_PIN_I2C_SDA` 的值 |
-| SCL | **GPIO17**（J1 pin 10） | 就是 `CFG_PIN_I2C_SCL` 的值 |
+| G | GND | mandatory |
+| V | 3V3 (or 5V) | 3.3–5 V; the module has an on-board regulator |
+| SDA | **GPIO18** (J1 pin 11) | this is the value of `CFG_PIN_I2C_SDA` |
+| SCL | **GPIO17** (J1 pin 10) | this is the value of `CFG_PIN_I2C_SCL` |
 
-> 唯一准绳是 `src/app_config.h` 里的两个常量：`CFG_PIN_I2C_SDA=18`、`CFG_PIN_I2C_SCL=17`。
-> 即 **"ESP32 的 GPIO18 当 SDA，GPIO17 当 SCL"**。
+> The single source of truth is the two constants in `src/app_config.h`:
+> `CFG_PIN_I2C_SDA=18`, `CFG_PIN_I2C_SCL=17`. In words: **ESP32 GPIO18 is SDA, GPIO17 is SCL.**
 >
-> ⚠️ 这不是 ESP32 的惯例接法（惯例是 5/4 或 8/9，本工程 2026-09-28 前用的也是 5/4）。
-> 定成 17/18 是因为现场重新焊接时改到了这两个脚。注意 J1 的 pin 10 与 pin 11
-> **相邻**，SDA/SCL 相邻会带来锡桥风险 —— bring-up 固件第 1 步现在会专门测这一项。
+> ⚠️ This is not the conventional mapping for ESP32 (the usual choices are 5/4 or 8/9, and
+> this project itself used 5/4 before 2026-09-28). It became 17/18 because the bench
+> re-soldered the wires to those pins. Note that J1's pin 10 and pin 11 are **adjacent**,
+> and adjacent SDA/SCL brings solder-bridge risk — bring-up firmware step 1 now tests for
+> exactly that.
 >
-> **做 PCB / 压排线**：丝印必须按上表标注，否则会重新踩"接反 → 全总线 NACK"的坑。
-> 这类故障的表征非常迷惑人 —— 电平、上拉、波形全都正常，错误码清一色 NACK，
-> 极易被误判成"模块坏了"或"引脚坏了"。判别方法：跑 bring-up 固件第 3 步的
-> 自动互换扫描，它会替你把这件事确认掉。
+> **Making a PCB / crimping a ribbon**: the silkscreen must match the table above, or you
+> will walk straight back into the "swapped → whole-bus NACK" trap. That failure is very
+> deceptive — levels, pull-ups and waveform are all normal, the error codes are uniformly
+> NACK, and it is easily misread as "the module is dead" or "the pin is dead". To settle it,
+> run bring-up firmware step 3's automatic swap scan; it will confirm the answer for you.
 
-**避开这些引脚**：GPIO0 / GPIO3 / GPIO45 / GPIO46 是 strapping 脚，上电电平会影响
-启动模式；GPIO19 / GPIO20 被原生 USB 占用；GPIO38 是 v1.1 的 RGB LED；
-GPIO39~42 是 JTAG；GPIO43 / GPIO44 是 UART0（**日志和烧录都走它，动了就看不到输出了**）。
-GPIO35~37 在 Octal PSRAM 型号上被内部占用（本工程 N8R2 为 Quad，未占用）。
+**Pins to avoid**: GPIO0 / GPIO3 / GPIO45 / GPIO46 are strapping pins whose level at power-up
+selects the boot mode; GPIO19 / GPIO20 are taken by native USB; GPIO38 is the v1.1 RGB LED;
+GPIO39–42 are JTAG; GPIO43 / GPIO44 are UART0 (**both logging and flashing go through them —
+disturb them and you lose all output**). GPIO35–37 are used internally on octal-PSRAM parts
+(this project's N8R2 is quad, so they are free).
 
 ---
 
-## 4. 常见报错速查
+## 4. Common errors quick reference
 
-| 现象 | 根因 | 处理 |
+Log text is given verbatim in Chinese, with the meaning in English.
+
+| Symptom | Root cause | Action |
 |---|---|---|
-| `endTransmission = 5`，全地址 | 未供电 / 接反 / 无上拉 / 总线拉死 | 按第 1 节顺序排查 |
-| `endTransmission = 2`，0x28，且全扫描无应答 | 总线电气正常但对面无人 | 量模块 V-GND 是否有电；核对 SDA/SCL 是否接反（本项目应为 SDA=GPIO18 / SCL=GPIO17） |
-| 第 1 步报 `PULLUP=0` | 该脚被钉在 GND | 查连焊/锡桥；若确认无焊接问题，该脚已击穿，换脚 |
-| 第 1 步报 `DRIVE0=1` | 该脚输出级失效 | 这个脚不能用了，换一对引脚并同步改 `app_config.h` |
-| 第 1 步报 `HiZ=0` | 线上无外部上拉可达 | 焊点/走线断路，或模块没接上 |
-| 第 1 步报 `SDA 与 SCL 被短路` | 相邻引脚锡桥 | **重新焊接后最常见**。用吸锡带清干净；J1 的 17/18、4/5 都是相邻脚 |
-| `VersionReg=0x00` 或 `0xFF` | 地址应答了但寄存器读不通 | 大概率是上拉不足，加 4.7 kΩ |
-| 上电偶发不工作，断电就好 | 厂商库记录的已知上电时序问题 | 生产固件会自动自愈；根治要加电源开关 |
-| 读卡时好时坏 | 卡在 2 cm 边界 / 上拉不足 | 靠近一点；加上拉；`CFG_RC522_TRELOAD` 调回 1000 |
-| 串口反复打印启动横幅 | 复位循环 | 生产固件第 8 次会自动进安全模式；看 `reset_reason` |
-| 日志里只有"缺席 第 N 次恢复失败"，且相隔越来越久 | **这是设计行为**，不是故障 | 指数退避在工作。按日志里的诊断结论去查硬件，不用改固件 |
-| `link=LOST` 反复出现、能自愈成功又掉 | 排线接触不良 / 模块供电跌落 | 检查排线；示波器看模块 V 在寻卡瞬间是否跌落（天线启动电流大） |
+| `endTransmission = 5`, all addresses | unpowered / swapped / no pull-up / bus held low | work through section 1 in order |
+| `endTransmission = 2`, 0x28, and a full scan finds nothing | bus electrically fine, nobody there | measure V–GND at the module; check whether SDA/SCL are swapped (should be SDA=GPIO18 / SCL=GPIO17) |
+| step 1 reports `PULLUP=0` | the pin is pinned to GND | check for a solder bridge; if soldering is ruled out the pin is blown — move pins |
+| step 1 reports `DRIVE0=1` | the pin's output stage failed | that pin is unusable; move to another pair and update `app_config.h` |
+| step 1 reports `HiZ=0` | no external pull-up reachable | open pad / broken trace, or the module is not connected |
+| step 1 reports `SDA 与 SCL 被短路` *(SDA and SCL are shorted)* | solder bridge between adjacent pins | **most common after re-soldering.** Clean it with desoldering braid; J1's 17/18 and 4/5 are both adjacent pairs |
+| `VersionReg=0x00` or `0xFF` | the address ACKs but register reads do not work | almost certainly insufficient pull-up; add 4.7 kΩ |
+| Intermittently dead after power-up, fixed by a power cycle | the vendor library's known power-sequencing issue | the production firmware heals automatically; cure it properly with a load switch |
+| Reads work intermittently | card at the 2 cm boundary / insufficient pull-up | move closer; add pull-ups; set `CFG_RC522_TRELOAD` back to 1000 |
+| Serial repeatedly prints the boot banner | reset loop | the production firmware enters safe mode on the 8th boot; check `reset_reason` |
+| Log shows only "缺席 第 N 次恢复失败" *(absent, recovery attempt N failed)* with growing gaps | **this is designed behaviour**, not a fault | exponential backoff at work. Follow the diagnosis text in the log to check the hardware; do not change the firmware |
+| `link=LOST` recurs, heals successfully then drops again | loose ribbon / module supply sag | check the ribbon; scope the module's V rail during a poll to see if it dips (antenna inrush) |
 
 ---
 
-## 5. 从 bring-up 切回生产固件
+## 5. Switching back from bring-up to the production firmware
 
 ```bash
 pio run -e rymcu-esp32-s3-devkitc-1 -t upload
 pio device monitor -b 115200
 ```
 
-正常时应看到：
+A healthy boot looks like this (verbatim):
 
 ```
 =========================================================
@@ -220,24 +265,42 @@ pio device monitor -b 115200
 [   10000][STATE ] 运行 10s | 进卡 0 离卡 0 拒绝 0 丢弃 0 | 链路 UP  addr=0x28 SI522A @0x28 (0x92)
 ```
 
-注意 `SELF` 那一行：**生产固件也会在启动时做一遍引脚四态自检 + 锡桥检查**
-（与 bring-up 固件复用 `i2cbus::checkPin()` / `i2cbus::busShorted()` 同一份实现，
-判据不会漂移）。这样板子交到别人手上时，"接线错/线断/锡桥"这三个通常表现为
-"完全读不到卡"的问题，在第一秒就被区分开了。
+Line by line:
 
-刷卡：
+| Log line (translated) | Meaning |
+|---|---|
+| `SELF ] I2C 引脚自检通过 SDA=GPIO18 SCL=GPIO17 无短路` | pin self-check passed, no short |
+| `BOOT ] reset_reason=1(POWERON) 连续复位计数=1` | reset cause POWERON, consecutive-reset counter 1 |
+| `RFID ] 上电: 挂载成功 addr=0x28 chip=SI522A @0x28 (0x92)` | mount succeeded at 0x28, chip identified |
+| `BOOT ] 读卡器就绪` / `可以开始测试：请把卡片靠近读卡器` | reader ready / you may start testing |
+| `STATE ] 运行 10s \| 进卡 0 离卡 0 拒绝 0 丢弃 0 \| 链路 UP` | uptime 10 s; in/out/deny/drop = 0/0/0/0; link UP |
+
+Note the `SELF` line: **the production firmware also runs the pin four-state check plus the
+solder-bridge test at boot** (sharing the same implementation with the bring-up firmware —
+`i2cbus::checkPin()` / `i2cbus::busShorted()` — so the criteria can never drift apart). That
+way, when the board is handed to someone else, the three problems that normally all present
+as "cannot read any card" — wrong wiring, broken wire, solder bridge — are told apart within
+the first second.
+
+Tapping a card (verbatim):
 
 ```
 [    3421][CARD  ] >>> 读卡成功  UID = 27 1F BE 06    sak=0x08  [放行 ALLOW]
 [    4288][CARD  ] <<< 卡片移开  UID = 27 1F BE 06    在位 867 ms  读取 29 次
 ```
 
-> 交接给同事测试时，直接把 `docs/测试交接说明.md` 给他即可 ——
-> 里面有接线表、串口参数、期望输出、以及"看到什么说明什么问题"的判读表。
+> *`>>> 读卡成功` = read OK; `UID = 27 1F BE 06`; `sak=0x08`; `[放行 ALLOW]` = permitted.
+> `<<< 卡片移开` = card removed; `在位 867 ms` = present for 867 ms; `读取 29 次` = read 29 times.*
 
-若首次挂载失败，注意现在的行为是**指数退避重试 + 一句诊断结论**，
-不会再出现"每 30 ms 刷一次总线 + 每 150 ms 打一次自愈失败"那种刷屏
-（下面例子取"接反"这个实际踩过的场景，全 NACK + 零超时）：
+> When handing this to a colleague for testing, just give them
+> `docs/TESTER-HANDOFF.md` — it contains the wiring table, serial parameters, expected output,
+> and a "if you see this, it means that" interpretation table.
+
+If the first mount fails, note that the behaviour now is **exponential backoff retries plus a
+one-line diagnosis**; you will no longer see the "hammer the bus every 30 ms + print a heal
+failure every 150 ms" flooding. The example below uses the swapped-pins case actually
+encountered in the field (all NACK, zero timeouts); the `X` placeholders are millisecond
+timestamps:
 
 ```
 [       X][RFID  ] 上电: 0x28 无应答 (endTransmission=2 NACK_ADDRESS)
@@ -252,13 +315,26 @@ pio device monitor -b 115200
         ...（节流到每 5 s 一行，退避到 10 s 封顶后一直保持）
 ```
 
-模块接好之后**不需要重启固件**，最长 10 s 内会自己接上：
+> *Translated: boot — 0x28 no response (NACK_ADDRESS); alternate address 0x2F no response;
+> full-bus scan found nothing across 112 addresses → the bus is electrically fine but no
+> address answers: suspect swapped SDA/SCL first (when swapped, levels/pull-ups/waveform are
+> all normal and error codes are uniformly NACK); only then an unpowered module, a dead
+> module, or an address outside the scan range. Reader not mounted; the acquisition task will
+> retry with exponential backoff (250 ms → 10 s). Diag: same as above. Reader absent (never
+> mounted) → entering slow retry. Absent: recovery attempt 1 failed, retrying after 250 ms;
+> attempt 2 failed, retrying after 500 ms; … (throttled to one line per 5 s; holds at the
+> 10 s cap).*
+
+Once the module is connected properly **the firmware does not need a restart** — it picks it
+up within at most 10 s:
 
 ```
 [       X][RFID  ] 链路恢复 addr=0x28 chip=SI522A @0x28 (0x92)（累计尝试 7 次）
 [       X][STATE ] 运行 ...s | 进卡 0 离卡 0 拒绝 0 丢弃 0 | 链路 UP  addr=0x28 SI522A @0x28 (0x92)
 ```
 
-> 链路恢复的发现延迟上界 = `CFG_BACKOFF_TICK_MS`（默认 50 ms）。
-> 若希望掉线时更快接回，把 `CFG_BACKOFF_MAX_MS` 从 10000 降到 2000 即可 ——
-> 代价是模块长期缺席时总线被刷的频次上升。
+> *Link recovered at 0x28, chip SI522A, after 7 cumulative attempts.*
+
+> The upper bound on noticing link recovery is `CFG_BACKOFF_TICK_MS` (50 ms by default). If
+> you want it to reconnect faster after a dropout, lower `CFG_BACKOFF_MAX_MS` from 10000 to
+> 2000 — at the cost of hitting the bus more often while the module is absent for a long time.

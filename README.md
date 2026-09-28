@@ -23,6 +23,18 @@ This firmware exists for the moment when a colleague says *"it doesn't read card
 | Watchdog / crash loop | none | task WDT + RTC-domain boot counter → safe mode |
 | Which serial port | one hardcoded port | USB-CDC **and** UART0, byte-identical output |
 
+## Documentation
+
+| Document | Audience |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Design rationale, failure-mode catalogue, timing budget, acceptance checklist |
+| [`docs/BRINGUP.md`](docs/BRINGUP.md) | Power-up troubleshooting handbook — how to read each of the six bring-up steps |
+| [`docs/TESTER-HANDOFF.md`](docs/TESTER-HANDOFF.md) | Hand-off notes for whoever holds the board; assumes no firmware knowledge |
+
+All three have Chinese originals (`*.zh-CN.md`), cross-linked at the top of each page.
+Log samples inside them stay verbatim (the firmware prints Chinese) with English glosses
+in the surrounding text.
+
 ## Hardware
 
 | | |
@@ -185,7 +197,7 @@ On top of the per-pin check there is a dedicated **solder-bridge test** between 
 
 ## Architecture
 
-Full design rationale and failure-mode catalogue: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) *(Chinese)*.
+Full design rationale and failure-mode catalogue: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ```
                 Core 1                                Core 0
@@ -239,9 +251,10 @@ src/
 lib/
   YFROBOTRFIDI2C/       vendored vendor driver, locally patched — see PATCHES.md
 docs/
-  ARCHITECTURE.md       design rationale and failure-mode catalogue  (Chinese)
-  BRINGUP.md            bring-up procedure, step by step             (Chinese)
-  测试交接说明.md         hand-off notes for testers                   (Chinese)
+  ARCHITECTURE.md       design rationale and failure-mode catalogue
+  BRINGUP.md            bring-up procedure, step by step
+  TESTER-HANDOFF.md     hand-off notes for testers
+  *.zh-CN.md            Chinese originals of the three documents above
 ```
 
 Two build environments share one source tree, separated by `build_src_filter`, so bring-up code never leaks into the production binary and vice versa.
